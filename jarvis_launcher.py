@@ -94,6 +94,134 @@ PROCESS_NAMES = {
 }
 
 # ── CHROME FINDER (cross-platform) ───────────────────────────────────────────
+
+def find_chrome():
+    plat = _plat.system()
+    user = os.environ.get("USERNAME") or os.environ.get("USER", "")
+    if plat == "Windows":
+        for c in [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            rf"C:\Users\{user}\AppData\Local\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]:
+            if os.path.exists(c): return c
+    elif plat == "Darwin":
+        for c in [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ]:
+            if os.path.exists(c): return c
+    else:
+        for cmd in ["google-chrome","google-chrome-stable","chromium-browser","chromium","microsoft-edge"]:
+            try:
+                r = subprocess.run(["which", cmd], capture_output=True, text=True)
+                if r.returncode == 0: return r.stdout.strip()
+            except Exception: pass
+    return None
+
+# Global schedule storage
+# Stores scheduled action dicts keyed by their unique ID.
+_scheduled_actions: dict = {}
+
+# ── SCHEDULING HELPERS ───────────────────────────────────────────────────────────
+
+def _next_schedule_time(trigger: dict, now: datetime = None) -> datetime:
+    """Calculate the next datetime for a given trigger.
+
+    Currently supports:
+    - daily: trigger dict must contain "time" in HH:MM (24‑hour) format.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if trigger.get("type") == "daily":
+        time_str = trigger.get("time", "00:00")
+        try:
+            hour, minute = map(int, time_str.split(":"))
+        except Exception:
+            hour, minute = 0, 0
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate = candidate + timedelta(days=1)
+        return candidate
+    # Fallback: return now
+    return now
+
+def create_scheduled_action(action: dict, now: datetime = None) -> dict:
+    """Create a scheduled action entry.
+
+    The *action* dict must contain a "trigger" key. Supported trigger types:
+    - delay_seconds: integer seconds from *now*.
+    - daily: dict with type "daily" and "time" "HH:MM".
+    The function generates a unique ID if not supplied, stores the action in
+    ``_scheduled_actions`` and returns the stored dict.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    # Ensure an ID exists
+    action_id = action.get("id") or str(uuid.uuid4())
+    action["id"] = action_id
+    # Default status
+    action["status"] = "scheduled"
+    trigger = action.get("trigger", {})
+    if "delay_seconds" in trigger:
+        scheduled = now + timedelta(seconds=trigger["delay_seconds"])
+    elif trigger.get("type") == "daily":
+        scheduled = _next_schedule_time(trigger, now)
+    else:
+        scheduled = now
+    action["scheduled_for"] = scheduled.isoformat()
+    _scheduled_actions[action_id] = action
+    return action
+
+def list_scheduled_actions() -> list:
+    """Return a list of all scheduled actions ordered by their scheduled time."""
+    return sorted(_scheduled_actions.values(), key=lambda a: a.get("scheduled_for", ""))
+
+def cancel_scheduled_action(action_id: str) -> bool:
+    """Mark a scheduled action as cancelled.
+
+    Returns ``True`` if the action existed and was not already completed.
+    """
+    act = _scheduled_actions.get(action_id)
+    if act and act.get("status") not in ("completed", "cancelled"):
+        act["status"] = "cancelled"
+        return True
+    return False
+
+def _execute_scheduled_actions(item: dict):
+    """Execute the actions defined in a scheduled item.
+
+    This helper updates the item status to ``completed`` after processing.
+    It uses ``open_url_in_slot`` and ``close_all_url_windows`` which are
+    defined elsewhere in this module.
+    """
+    actions = item.get("actions", [])
+    global _url_slot
+    for act in actions:
+        typ = act.get("type")
+        if typ == "open_url":
+            url = act.get("url")
+            # Use the current slot and then advance.
+            open_url_in_slot(url, _url_slot)
+            _url_slot = (_url_slot + 1) % 4
+        elif typ == "close_tabs":
+            close_all_url_windows(auto=act.get("auto", False))
+        # Additional action types can be added here.
+    item["status"] = "completed"
+
+# Export symbols for tests
+__all__ = [
+    "create_scheduled_action",
+    "list_scheduled_actions",
+    "cancel_scheduled_action",
+    "_next_schedule_time",
+    "_execute_scheduled_actions",
+    "_scheduled_actions",
+]
+
 def find_chrome():
     plat = _plat.system()
     user = os.environ.get("USERNAME") or os.environ.get("USER", "")
